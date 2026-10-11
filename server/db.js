@@ -18,14 +18,19 @@ const rows = (r) => r.rows;
 const q = (sql, params) => pool.query(sql, params).then(rows);
 const one = (sql, params) => q(sql, params).then((r) => r[0]);
 
-/** Run fn inside a transaction. fn receives { q, one } bound to that transaction. */
+/**
+ * Run fn inside a transaction. fn receives { q, one, after } bound to that transaction.
+ * t.after(fn) queues a callback that runs only once the transaction has committed (used for push notifications).
+ */
 async function tx(fn) {
   const c = await pool.connect();
+  const later = [];
   try {
     await c.query('BEGIN');
-    const t = { q: (s, p) => c.query(s, p).then(rows), one: (s, p) => c.query(s, p).then((r) => r.rows[0]) };
+    const t = { q: (s, p) => c.query(s, p).then(rows), one: (s, p) => c.query(s, p).then((r) => r.rows[0]), after: (f) => later.push(f) };
     const out = await fn(t);
     await c.query('COMMIT');
+    later.forEach((f) => { try { f(); } catch (e) { console.error(e); } });
     return out;
   } catch (e) {
     try { await c.query('ROLLBACK'); } catch (x) { /* ignore */ }
@@ -35,7 +40,7 @@ async function tx(fn) {
   }
 }
 
-const TABLES = ['users', 'stores', 'products', 'orders', 'msgs', 'notes', 'reviews', 'tickets', 'settings'];
+const TABLES = ['users', 'stores', 'products', 'orders', 'msgs', 'notes', 'reviews', 'tickets', 'settings', 'resets', 'push_subs', 'payments', 'rate_hits'];
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users(
   id SERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, pw TEXT NOT NULL,
@@ -63,12 +68,24 @@ CREATE TABLE IF NOT EXISTS tickets(
   id SERIAL PRIMARY KEY, uid INTEGER NOT NULL, topic TEXT NOT NULL, oid INTEGER NOT NULL DEFAULT 0, msg TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'Open', reply TEXT NOT NULL DEFAULT '', ts BIGINT NOT NULL);
 CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS resets(email TEXT PRIMARY KEY, code TEXT NOT NULL, exp BIGINT NOT NULL, tries INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS push_subs(
+  id SERIAL PRIMARY KEY, uid INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, endpoint TEXT NOT NULL UNIQUE,
+  p256dh TEXT NOT NULL, auth TEXT NOT NULL, ts BIGINT NOT NULL);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS rid INTEGER;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS pin TEXT NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS payments(
+  id SERIAL PRIMARY KEY, ref TEXT NOT NULL UNIQUE, uid INTEGER NOT NULL, oids JSONB NOT NULL, amount DOUBLE PRECISION NOT NULL,
+  status TEXT NOT NULL DEFAULT 'PENDING', xid TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', ts BIGINT NOT NULL);
+CREATE TABLE IF NOT EXISTS rate_hits(k TEXT PRIMARY KEY, n INTEGER NOT NULL, reset BIGINT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_orders_rid ON orders(rid);
 CREATE INDEX IF NOT EXISTS idx_orders_bid ON orders(bid);
 CREATE INDEX IF NOT EXISTS idx_orders_sid ON orders(sid);
 CREATE INDEX IF NOT EXISTS idx_msgs_f ON msgs(f);
 CREATE INDEX IF NOT EXISTS idx_msgs_t ON msgs(t);
 CREATE INDEX IF NOT EXISTS idx_notes_uid ON notes(uid);
 CREATE INDEX IF NOT EXISTS idx_products_sid ON products(sid);
+CREATE INDEX IF NOT EXISTS idx_push_uid ON push_subs(uid);
 -- Supabase exposes public tables through its REST API. This app talks to Postgres directly from the server,
 -- so Row Level Security is turned on with no policies: nobody can read these tables with the public API keys.
 ${TABLES.map((t) => `ALTER TABLE ${t} ENABLE ROW LEVEL SECURITY;`).join('\n')}
