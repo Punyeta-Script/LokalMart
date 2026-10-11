@@ -1,6 +1,6 @@
 # LokalMart
 
-Mobile-friendly **multi-vendor marketplace** for local sellers (barangays: Balbalayang (Pob.), Banga, Caoayan, Danac, Licungan, Pangotan).
+Mobile-friendly **multi-vendor marketplace** for local sellers.
 
 | Layer | Tech |
 |---|---|
